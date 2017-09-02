@@ -14,17 +14,31 @@ namespace UnityStandardAssets.Characters.FirstPerson
             public float ForwardSpeed = 8.0f;   // Speed when walking forward
             public float BackwardSpeed = 4.0f;  // Speed when walking backwards
             public float StrafeSpeed = 4.0f;    // Speed when walking sideways
+            public float WallRunMaxSpeed = 24f;    // Speed when running on a wall
             public float RunMultiplier = 2.0f;   // Speed when sprinting
+            public float WallRunForce = 100f; // Multiplier to define the force applied when starting a wall run, depending on the current velocity
             public float AerialSlowDownMultiplier = 3.0f;  // Multiplier to SlowDown in the Air
-	        public KeyCode RunKey = KeyCode.LeftShift;
+            public float WallRunSlowDownMultiplier = 0.3f; // Multiplier to slow down when starting a wall run
+
+            public KeyCode RunKey = KeyCode.LeftShift;
             public float JumpForce = 10f;  // Force applied at each frame of jumping
             public float JumpThreshold = 0.25f; // Time during which the player can hold its jump
+            public float WallRunThreshold = 6.0f; // Minimum speed for a wall Run to be initiated
+            public float RotationSpeedOnWall = 20f; // Speed of the player's rotation when starting a wall run
+            public float WallRunAngle = 15f; // Angle of inclination with the wall while wall running
+            public float MaxWallRunCompensationForce = 8.01f; // Maximum force applied to compensate the gravity while wall running
+            public float WallRunDrag = 0.15f; // Horizontal slow down force
+            public float WallRunFallingThresholdSpeed = 15f;   // Speed below which the player progressively falls of the wall
+            public float WallRunNoCompensationThresholdSpeed = 10f;   // Speed below which no more composation force is applied during a wall run
+            public float WallJumpHorizontalForce = 30f;  // Force applied to leave the wall when wall jumping
+            public float WallRunCoolDown = 0.4f; // Cooldown applied after a wall jump to prevent the player from triggerring a wall run again before leaving the wall
+
             public AnimationCurve SlopeCurveModifier = new AnimationCurve(new Keyframe(-90.0f, 1.0f), new Keyframe(0.0f, 1.0f), new Keyframe(90.0f, 0.0f));
             [HideInInspector] public float CurrentTargetSpeed = 8f;
 
             private bool m_Running;
 
-
+            // Only used to determine a speed on the ground
             public void UpdateDesiredTargetSpeed(Vector2 input)
             {
 	            if (input == Vector2.zero) return;
@@ -74,26 +88,37 @@ namespace UnityStandardAssets.Characters.FirstPerson
             public float shellOffset; //reduce the radius by that ratio to avoid getting stuck in wall (a value of 0.1f is nice)
         }
 
+        enum WallDirection { Right, Left };
+
 
         public Camera cam;
         public MovementSettings movementSettings = new MovementSettings();
         public MouseLook mouseLook = new MouseLook();
         public AdvancedSettings advancedSettings = new AdvancedSettings();
 
+        public LayerMask layer; // layer for the walls detection
 
         private Rigidbody m_RigidBody;
         private CapsuleCollider m_Capsule;
         private float m_YRotation;
         private Vector3 m_GroundContactNormal;
-        private bool m_Jump, m_PreviouslyGrounded, m_Jumping, m_IsGrounded, m_CanSlowDown, m_CanJump, m_CanDoubleJump, m_Jumped;
+        private bool m_Jump, m_PreviouslyGrounded, m_Jumping, m_IsGrounded, m_CanSlowDown, m_CanJump, m_CanDoubleJump, m_Jumped, m_IsWallRunning;
 
-        public float m_JumpDuration; // Duration of the current jump
+        private float m_JumpDuration; // Duration of the current jump
+        private float radius;
+        private float rayCastLengthCheck; // Length for the wall ray cast
+        private Vector3 wallRunForward;  // Forward vector of the wall currently running on
+        private Vector3 wallRunNormal;  // Normal vector of the wall currently running on
+        private float wallRunCoolDown; // Time before the player can perform a wall run again
+        private Boolean mustConsiderDirectionInput;   // Should the code be checking for the input's direction when jumping ? 
+        
 
 
         // m_Jumping : true if the player is currently jumping, false otherwise
         // m_CanSlowDown : true if the player can still slow down during his current aerial movement, false otherwise : if its horizontal mobility is already 0
         // m_CanDoubleJump : true if the player can currently doubleJump, false otherwise. Set to true only after that the player used its first jump
         // m_CanJump : true if the player can currently jump, false otherwise. Set to true when the player doesn't push the jump button. Set to false at the end of a jump.
+        // m_IsWallRunning : true if the player is currently wall running, false otherwise
 
         public Vector3 Velocity
         {
@@ -123,20 +148,34 @@ namespace UnityStandardAssets.Characters.FirstPerson
         {
             m_RigidBody = GetComponent<Rigidbody>();
             m_Capsule = GetComponent<CapsuleCollider>();
+            radius = m_Capsule.radius;
+            rayCastLengthCheck = radius + 0.5f;
             mouseLook.Init (transform, cam.transform);
         }
 
 
         private void Update()
         {
-            RotateView();
+            if (!m_IsWallRunning)
+            { 
+                RotateView();
+            }
 
             if (CrossPlatformInputManager.GetButton("Jump") && m_CanJump)
             {
                 m_Jump = true;
-            } else if (!CrossPlatformInputManager.GetButton("Jump") && (m_IsGrounded || m_CanDoubleJump))
+            } else if (!CrossPlatformInputManager.GetButton("Jump") && (m_IsGrounded || m_CanDoubleJump || m_IsWallRunning))
             {
                 m_CanJump = true;
+            }
+
+            if (wallRunCoolDown > 0)
+            {
+                wallRunCoolDown -= Time.deltaTime;
+                if (wallRunCoolDown < 0)
+                {
+                    wallRunCoolDown = 0f;
+                }
             }
            
         }
@@ -146,13 +185,18 @@ namespace UnityStandardAssets.Characters.FirstPerson
         {
             GroundCheck();
             Vector2 input = GetInput();
+            Boolean wannaMove = (Mathf.Abs(input.x) > float.Epsilon || Mathf.Abs(input.y) > float.Epsilon);
+            Vector3 desiredMove = new Vector3();
 
-            if (Mathf.Abs(input.x) > float.Epsilon || Mathf.Abs(input.y) > float.Epsilon)
+            // ***** START OF DIRECTION SECTION ***** //
+
+            if (wannaMove || m_IsWallRunning)
             {
-                Vector3 desiredMove = cam.transform.forward * input.y + cam.transform.right * input.x;
+
+                desiredMove = cam.transform.forward * input.y + cam.transform.right * input.x;
                 desiredMove = Vector3.ProjectOnPlane(desiredMove, m_GroundContactNormal).normalized;
 
-                // always move along the camera forward as it is the direction that it being aimed at
+                // GROUNDED MOVEMENTS
                 if (m_IsGrounded)
                 {
                     desiredMove.x = desiredMove.x * movementSettings.CurrentTargetSpeed;
@@ -163,11 +207,12 @@ namespace UnityStandardAssets.Characters.FirstPerson
                     {
                         m_RigidBody.AddForce(desiredMove * SlopeMultiplier(), ForceMode.Impulse);
                     }
-                } else if (advancedSettings.airControl && m_CanSlowDown)
+                }
+                // AIR CONTROL
+                else if (advancedSettings.airControl && m_CanSlowDown && !m_IsWallRunning)
                 {
                     Vector3 aerialMove = Vector3.Project(desiredMove, m_RigidBody.velocity);
 
-                    // The player should slow down, whatever direction he is currently going towards
                     if (OpposedTo(aerialMove, m_RigidBody.velocity))
                     {
 
@@ -179,29 +224,66 @@ namespace UnityStandardAssets.Characters.FirstPerson
                         {
                             m_RigidBody.velocity = new Vector3(0f, m_RigidBody.velocity.y, 0f);
                             m_CanSlowDown = false;
-                        } 
+                        }
+                    }
+                } 
+                // WALLRUN FORCE
+                else if (m_IsWallRunning)   // Test on the m_IsWallRunning redundant with the last else if, kept for reminding
+                {
+                    if (m_RigidBody.velocity.y < 0f)
+                    {
+                        Vector3 compensationForce = Vector3.up * movementSettings.MaxWallRunCompensationForce;
+                        float compensationReducer = (m_RigidBody.velocity.magnitude - movementSettings.WallRunNoCompensationThresholdSpeed) /
+                            (movementSettings.WallRunFallingThresholdSpeed - movementSettings.WallRunNoCompensationThresholdSpeed);
+                        if (compensationReducer > 1f)
+                        {
+                            compensationReducer = 1f;
+                        } else if (compensationReducer < 0f)
+                        {
+                            compensationReducer = 0f;
+                        }
+                        
+                        // lower speed => lower gravity compensation to start falling of the wall
+                        compensationForce *= compensationReducer;
+                        m_RigidBody.AddForce(compensationForce, ForceMode.Impulse);
                     }
                 }
-                
             }
 
-            if (m_IsGrounded || m_CanDoubleJump || m_Jumping)
+            // ***** END OF DIRECTION SECTION ***** //
+
+            // ***** START OF THE JUMP SECTION ***** //
+
+            if (m_IsGrounded || m_CanDoubleJump || m_Jumping || m_IsWallRunning)
             {
-
-                //Debug.Log("Value of m_CanDoubleJump : " + m_CanDoubleJump);
-
+      
                 if (m_Jump)
                 {
-                    // First frame of jumping
+                    // FIRST FRAME OF JUMPING
                     if (!m_Jumping)
                     {
-                        m_RigidBody.drag = 0f;
                         m_Jumping = true;
                         m_JumpDuration = 0f;
                         if (m_CanDoubleJump)
                         {
                             m_CanDoubleJump = false;
                             m_RigidBody.velocity = new Vector3(m_RigidBody.velocity.x, 0f, m_RigidBody.velocity.z);
+                            if (wannaMove && mustConsiderDirectionInput)
+                            //if (wannaMove)
+                            {
+                                float angle = Vector3.SignedAngle(m_RigidBody.velocity, desiredMove, Vector3.up);
+                                m_RigidBody.velocity = Quaternion.AngleAxis(angle, Vector3.up) * m_RigidBody.velocity;
+                            }
+                        }
+                        if (m_IsWallRunning)
+                        {
+                            wallRunCoolDown = movementSettings.WallRunCoolDown;
+                            m_IsWallRunning = false;
+                            m_CanDoubleJump = true;
+                            mustConsiderDirectionInput = false;
+                            Vector3 horizontalForce = wallRunNormal * movementSettings.WallJumpHorizontalForce;
+                            // TODO Consider to add a forward force to give the player a boost in speed
+                            m_RigidBody.AddForce(horizontalForce, ForceMode.Impulse);
                         }
                     }
                     else
@@ -210,15 +292,12 @@ namespace UnityStandardAssets.Characters.FirstPerson
                     }
 
                     m_RigidBody.AddForce(new Vector3(0f, movementSettings.JumpForce, 0f), ForceMode.Impulse);
+                    
                 }
 
-                if (m_IsGrounded)
+                if (!m_IsGrounded)
                 {
-                    m_RigidBody.drag = 5f;
-                }
-                else
-                {
-                    // Condition to stop jumping
+                    // CONDITION TO STOP JUMPING
                     if (m_Jumping && (!m_Jump || m_JumpDuration >= movementSettings.JumpThreshold))
                     {
                         m_Jumping = false;
@@ -227,10 +306,9 @@ namespace UnityStandardAssets.Characters.FirstPerson
                         {
                             m_Jumped = true;
                             m_CanDoubleJump = true;
+                            mustConsiderDirectionInput = true;
                         }
                     }
-
-                    m_RigidBody.drag = 0f;
                 }
 
                 //if (!m_Jumping && Mathf.Abs(input.x) < float.Epsilon && Mathf.Abs(input.y) < float.Epsilon && m_RigidBody.velocity.magnitude < 1f)
@@ -240,11 +318,123 @@ namespace UnityStandardAssets.Characters.FirstPerson
             }
             else
             {
-                m_RigidBody.drag = 0f;
                 //if (m_PreviouslyGrounded && !m_Jumping)
                 //{
                 //    StickToGroundHelper();
                 //}
+            }
+
+            // ***** END OF THE JUMP SECTION ***** //
+
+            // ***** START OF THE WALLRUN INITIATION SECTION ***** //
+
+            if (!m_IsGrounded && IsWallToLeftOrRight() && !m_IsWallRunning && CanWallRun())
+            {
+                wallRunForward = new Vector3();
+                Vector3 velocityOnWall = new Vector3();
+
+                if (IsWallToDirection(WallDirection.Right))
+                {
+                    wallRunForward = GetWallForward(WallDirection.Right);
+                    wallRunNormal = GetWallNormal(WallDirection.Right);
+                } else if (IsWallToDirection(WallDirection.Left))
+                {
+                    wallRunForward = GetWallForward(WallDirection.Left);
+                    wallRunNormal = GetWallNormal(WallDirection.Left);
+                }
+
+                velocityOnWall = Vector3.Project(m_RigidBody.velocity, wallRunForward);
+                if (velocityOnWall.magnitude > movementSettings.WallRunThreshold)
+                {
+                    m_IsWallRunning = true;
+                    // PATCH HERE FOR A MORE REALISTIC SLOW DOWN FEELING
+                    if (m_RigidBody.velocity.y < 0f)
+                    {
+                        m_RigidBody.velocity = new Vector3(m_RigidBody.velocity.x, 0f, m_RigidBody.velocity.z);
+
+                    }
+                    if (velocityOnWall.sqrMagnitude < (movementSettings.WallRunMaxSpeed * movementSettings.WallRunMaxSpeed))
+                    {
+                        //Vector3 accelerationForce = Quaternion.AngleAxis(movementSettings.WallRunForceAngle, wallRunNormal) * wallRunForward;
+                        Vector3 accelerationForce = wallRunForward * movementSettings.WallRunForce;
+                        // Higher speed = weaker force
+                        //Debug.Log("Before reduction depending on the speed : " + accelerationForce);
+                        accelerationForce *= 1f - (velocityOnWall.magnitude - movementSettings.WallRunThreshold) / (movementSettings.WallRunMaxSpeed - movementSettings.WallRunThreshold);
+                        //Debug.Log("After reduction depending on the speed : " + accelerationForce);
+                        m_RigidBody.AddForce(accelerationForce, ForceMode.Impulse);
+                    }
+
+                    // This part of code shouldn't be used, normally the force is applied at each frame during the wall run 
+
+                    //Vector3 wallRunForce = velocityOnWall * movementSettings.WallRunSpeedMultiplier;
+                    //m_RigidBody.AddForce(wallRunForce);
+                }
+            }
+
+            // ***** END OF THE WALLRUN INITIATION SECTION ***** //
+
+
+            // ***** START OF ROTATION CODE ***** //
+
+            if (m_IsWallRunning)
+            {
+
+                float angleYAxis = Vector3.SignedAngle(m_RigidBody.transform.forward, wallRunForward, Vector3.up);
+                float rotationYAxis = 0f;
+
+                if (Math.Abs(angleYAxis) < movementSettings.RotationSpeedOnWall * Time.fixedDeltaTime)
+                {
+                    rotationYAxis = angleYAxis;
+                }
+                else
+                {
+                    rotationYAxis = movementSettings.RotationSpeedOnWall;
+                    if (angleYAxis < 0)
+                    {
+                        rotationYAxis = -rotationYAxis;
+                    }
+                }
+                transform.Rotate(Vector3.up * Time.fixedDeltaTime * rotationYAxis);
+
+
+                Vector3 targetInclination = Vector3.up;
+                if (IsWallToDirection(WallDirection.Right))
+                {
+                    targetInclination = Quaternion.AngleAxis(movementSettings.WallRunAngle, wallRunForward) * targetInclination;
+                } else if (IsWallToDirection(WallDirection.Left))
+                {
+                    targetInclination = Quaternion.AngleAxis(-movementSettings.WallRunAngle, wallRunForward) * targetInclination;
+                }
+
+                float angleXAxis = Vector3.SignedAngle(m_RigidBody.transform.up, targetInclination, wallRunForward);
+                float rotationXAxis = 0f;
+
+                if(Math.Abs(angleXAxis) < movementSettings.RotationSpeedOnWall * Time.fixedDeltaTime)
+                {
+                    rotationXAxis = angleXAxis;
+                } else
+                {
+                    rotationXAxis = movementSettings.RotationSpeedOnWall;
+                    if(angleXAxis < 0)
+                    {
+                        rotationXAxis = -rotationXAxis;
+                    }
+                }
+                transform.Rotate(wallRunForward * Time.fixedDeltaTime * rotationXAxis, Space.World);
+            }
+
+            // ***** END OF ROTATION CODE ***** //
+
+            // DRAG CONTROL
+            if (m_IsGrounded)
+            {
+                m_RigidBody.drag = 5f;
+            } else if (m_IsWallRunning)
+            {
+                m_RigidBody.drag = movementSettings.WallRunDrag;
+            } else
+            {
+                m_RigidBody.drag = 0f;
             }
 
             m_Jump = false;
@@ -314,6 +504,7 @@ namespace UnityStandardAssets.Characters.FirstPerson
             {
                 m_IsGrounded = true;
                 m_CanSlowDown = true;
+                m_IsWallRunning = false;
                 m_Jumped = false;
                 m_GroundContactNormal = hitInfo.normal;
             }
@@ -330,9 +521,89 @@ namespace UnityStandardAssets.Characters.FirstPerson
 
         private Boolean OpposedTo(Vector3 vector1, Vector3 vector2)
         {
-            float dotProduct = Vector3.Dot(vector1, vector2);
-            float magnitudeProduct = vector1.magnitude * vector2.magnitude;
-            return (dotProduct == -magnitudeProduct);
+            // Projection des vecteur dans le plan XZ, Projection du vecteur joueur sur le vecteur mur, Normalisation des vecteurs, calcul du produit vectoriel
+            vector1 = Vector3.Normalize(Vector3.ProjectOnPlane(vector1, Vector3.up));
+            vector2 = Vector3.Normalize(Vector3.Project(Vector3.ProjectOnPlane(vector2, Vector3.up),vector1));
+
+            return (Vector3.Dot(Vector3.Normalize(vector1), Vector3.Normalize(vector2)) == -1 );
+        }
+
+        public Boolean IsWallToLeftOrRight()
+        {
+            return (IsWallToDirection(WallDirection.Left) || IsWallToDirection(WallDirection.Right));
+        }
+
+        private Boolean IsWallToDirection(WallDirection d)
+        {
+            Vector3 direction = new Vector3();
+            if (d == WallDirection.Right)
+            {
+                direction = transform.right;
+            } else if (d == WallDirection.Left)
+            {
+                direction = -transform.right;
+            }
+            bool wall = Physics.Raycast(new Vector3(transform.position.x, transform.position.y, transform.position.z), direction, rayCastLengthCheck, layer);
+            return wall;
+        }
+
+        private Vector3 GetWallForward(WallDirection d)
+        {
+            RaycastHit hit;
+            GameObject wallInContact;
+            Vector3 wallForwardDirection = new Vector3();
+            Vector3 direction = new Vector3();
+            if (d == WallDirection.Left)
+            {
+                direction = -transform.right;
+            } else if (d == WallDirection.Right)
+            {
+                direction = transform.right;
+            }
+            if (Physics.Raycast(new Vector3(transform.position.x, transform.position.y, transform.position.z), direction, out hit, 10f * rayCastLengthCheck, layer))
+            {
+                wallInContact = hit.collider.gameObject;
+                if (OpposedTo(wallInContact.transform.forward, cam.transform.forward))
+                {
+                    wallForwardDirection = -wallInContact.transform.forward;
+                }
+                else
+                {
+                    wallForwardDirection = wallInContact.transform.forward;
+                }
+            }
+            return wallForwardDirection;
+        }
+
+
+        // return the direction of the wall normal vector
+        private Vector3 GetWallNormal(WallDirection d)
+        {
+            RaycastHit hit;
+            GameObject wallInContact;
+            Vector3 direction = new Vector3();
+            Vector3 normal = new Vector3();
+
+            if (d == WallDirection.Right)
+            {
+                direction = cam.transform.right;
+            } else if (d == WallDirection.Left)
+            {
+                direction = -cam.transform.right;
+            }
+
+            if (Physics.Raycast(new Vector3(transform.position.x, transform.position.y, transform.position.z), direction, out hit, 10f * rayCastLengthCheck, layer))
+            {
+                wallInContact = hit.collider.gameObject;
+                normal = wallInContact.transform.right;
+            }
+            return normal;
+        }
+
+        private bool CanWallRun()
+        {
+            //Debug.Log("Cool down left is : " + wallRunCoolDown);
+            return wallRunCoolDown == 0f;
         }
     }
 }
