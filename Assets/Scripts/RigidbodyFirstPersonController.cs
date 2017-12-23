@@ -101,7 +101,7 @@ namespace UnityStandardAssets.Characters.FirstPerson
         public MouseLook mouseLook = new MouseLook();
         public AdvancedSettings advancedSettings = new AdvancedSettings();
 
-        public LayerMask layer; // layer for the walls detection
+        public LayerMask wallLayer; // layer for the walls detection
 
         private Rigidbody m_RigidBody;
         private CapsuleCollider m_Capsule;
@@ -167,6 +167,7 @@ namespace UnityStandardAssets.Characters.FirstPerson
                 RotateView();
             }
 
+            // Jump input
             if ((CrossPlatformInputManager.GetButton("Jump") || CrossPlatformInputManager.GetAxis("Jump") == 1) && m_CanJump)
             {
                 m_Jump = true;
@@ -179,15 +180,6 @@ namespace UnityStandardAssets.Characters.FirstPerson
             else
             {
                 m_Jump = false;
-            }
-
-            if (wallRunCoolDown > 0)
-            {
-                wallRunCoolDown -= Time.deltaTime;
-                if (wallRunCoolDown < 0)
-                {
-                    wallRunCoolDown = 0f;
-                }
             }
 
             // Turbo input
@@ -206,278 +198,265 @@ namespace UnityStandardAssets.Characters.FirstPerson
                         turboPoints = movementSettings.MaxTurboPoints;
                 }
             }
+
+            // WallRun time
+            if (wallRunCoolDown > 0)
+            {
+                wallRunCoolDown -= Time.deltaTime;
+                if (wallRunCoolDown < 0)
+                {
+                    wallRunCoolDown = 0f;
+                }
+            }    
         }
 
 
         private void FixedUpdate()
         {
-            if (!m_Immobilized)
+            if (m_Immobilized)
+            {
+                return;
+            }
+
+            GroundCheck();
+            Vector2 input = GetInput();
+            Boolean wannaMove = (Mathf.Abs(input.x) > float.Epsilon || Mathf.Abs(input.y) > float.Epsilon);
+            Vector3 desiredMove = new Vector3();
+
+            // ***** START OF DIRECTION SECTION ***** //
+
+            if (wannaMove || m_IsWallRunning)
             {
 
-                GroundCheck();
-                Vector2 input = GetInput();
-                Boolean wannaMove = (Mathf.Abs(input.x) > float.Epsilon || Mathf.Abs(input.y) > float.Epsilon);
-                Vector3 desiredMove = new Vector3();
+                desiredMove = cam.transform.forward * input.y + cam.transform.right * input.x;
+                desiredMove = Vector3.ProjectOnPlane(desiredMove, m_GroundContactNormal).normalized;
 
-                // ***** START OF DIRECTION SECTION ***** //
-
-                if (wannaMove || m_IsWallRunning)
+                // GROUNDED MOVEMENTS
+                if (m_IsGrounded)
                 {
-
-                    desiredMove = cam.transform.forward * input.y + cam.transform.right * input.x;
-                    desiredMove = Vector3.ProjectOnPlane(desiredMove, m_GroundContactNormal).normalized;
-
-                    // GROUNDED MOVEMENTS
-                    if (m_IsGrounded)
+                    float turboMultiplier;
+                    // TODO remove the hard int
+                    turboMultiplier = m_Turbo ? 1.3f : 1f;
+                    desiredMove *= movementSettings.CurrentTargetSpeed * turboMultiplier; 
+                    if (m_RigidBody.velocity.sqrMagnitude <
+                        (movementSettings.CurrentTargetSpeed * movementSettings.CurrentTargetSpeed))
                     {
-                        float turboMultiplier;
-                        turboMultiplier = m_Turbo ? 1.3f : 1f;
-                        desiredMove.x = desiredMove.x * movementSettings.CurrentTargetSpeed * turboMultiplier;
-                        desiredMove.z = desiredMove.z * movementSettings.CurrentTargetSpeed * turboMultiplier;
-                        desiredMove.y = desiredMove.y * movementSettings.CurrentTargetSpeed * turboMultiplier;
-                        if (m_RigidBody.velocity.sqrMagnitude <
-                            (movementSettings.CurrentTargetSpeed * movementSettings.CurrentTargetSpeed))
+                        m_RigidBody.AddForce(desiredMove * SlopeMultiplier(), ForceMode.Impulse);
+                    }
+                }
+                // AIR MOVEMENTS
+                else if (advancedSettings.airControl && m_CanSlowDown && !m_IsWallRunning)
+                {
+                    Vector3 aerialMove = Vector3.Project(desiredMove, m_RigidBody.velocity);
+
+                    if (OpposedTo(aerialMove, m_RigidBody.velocity))
+                    {
+
+                        Vector3 oldVelocity = m_RigidBody.velocity;
+                        aerialMove *= movementSettings.AerialSlowDownMultiplier;
+                        m_RigidBody.AddForce(aerialMove, ForceMode.Impulse);
+
+                        if (OpposedTo(m_RigidBody.velocity, oldVelocity))
                         {
-                            m_RigidBody.AddForce(desiredMove * SlopeMultiplier(), ForceMode.Impulse);
+                            m_RigidBody.velocity = new Vector3(0f, m_RigidBody.velocity.y, 0f);
+                            m_CanSlowDown = false;
                         }
                     }
-                    // AIR CONTROL
-                    else if (advancedSettings.airControl && m_CanSlowDown && !m_IsWallRunning)
+                }
+                // WALLRUN MOVEMENTS
+                else if (m_IsWallRunning && !m_Jump) 
+                {
+                    if (m_RigidBody.velocity.y < 0f)
                     {
-                        Vector3 aerialMove = Vector3.Project(desiredMove, m_RigidBody.velocity);
-
-                        if (OpposedTo(aerialMove, m_RigidBody.velocity))
+                        // TODO look for a better solution by tweeking the gravity value used for the player
+                        Vector3 compensationForce = Vector3.up * movementSettings.MaxWallRunCompensationForce;
+                        // TODO project the velocity on the forward direction before checking 
+                        if (m_RigidBody.velocity.magnitude > movementSettings.WallRunFallingThresholdSpeed)
                         {
-
-                            Vector3 oldVelocity = m_RigidBody.velocity;
-                            Vector3 slowDownForce = Vector3.Normalize(aerialMove) * movementSettings.AerialSlowDownMultiplier;
-                            m_RigidBody.AddForce(slowDownForce, ForceMode.Impulse);
-
-                            if (OpposedTo(m_RigidBody.velocity, oldVelocity))
-                            {
-                                m_RigidBody.velocity = new Vector3(0f, m_RigidBody.velocity.y, 0f);
-                                m_CanSlowDown = false;
-                            }
-                        }
-                    }
-                    // WALLRUN FORCE
-                    else if (m_IsWallRunning && !m_Jump)   // Test on the m_IsWallRunning redundant with the last else if, kept for reminding
-                    {
-                        if (m_RigidBody.velocity.y < 0f)
-                        {
-                            Vector3 compensationForce = Vector3.up * movementSettings.MaxWallRunCompensationForce;
-                            float compensationReducer = (m_RigidBody.velocity.magnitude - movementSettings.WallRunNoCompensationThresholdSpeed) /
-                                (movementSettings.WallRunFallingThresholdSpeed - movementSettings.WallRunNoCompensationThresholdSpeed);
-                            if (compensationReducer > 1f)
-                            {
-                                compensationReducer = 1f;
-                            }
-                            else if (compensationReducer < 0f)
-                            {
-                                compensationReducer = 0f;
-                            }
-
-                            // lower speed => lower gravity compensation to start falling of the wall
-                            compensationForce *= compensationReducer;
-                            //Debug.Log("Final CompensationForce" + compensationForce);
                             m_RigidBody.AddForce(compensationForce, ForceMode.Impulse);
                         }
                     }
                 }
+            }
 
-                // ***** END OF DIRECTION SECTION ***** //
+            // ***** END OF DIRECTION SECTION ***** //
 
-                // ***** START OF THE JUMP SECTION ***** //
+            // ***** START OF THE JUMP SECTION ***** //
 
-                if (m_IsGrounded || m_CanDoubleJump || m_Jumping || m_IsWallRunning)
+            if (CanJump())
+            {
+
+                if (m_Jump)
                 {
-
-                    if (m_Jump)
+                    // FIRST FRAME OF JUMPING
+                    if (!m_Jumping)
                     {
-                        // FIRST FRAME OF JUMPING
-                        if (!m_Jumping)
+                        m_Jumping = true;
+                        m_JumpDuration = 0f;
+                        // DOUBLE JUMP
+                        if (m_CanDoubleJump)
                         {
-                            m_Jumping = true;
-                            m_JumpDuration = 0f;
-                            if (m_CanDoubleJump)
-                            {
-                                m_CanDoubleJump = false;
-                                m_RigidBody.velocity = new Vector3(m_RigidBody.velocity.x, 0f, m_RigidBody.velocity.z);
-                                if (wannaMove && mustConsiderDirectionInput)
-                                {
-                                    float angle = Vector3.SignedAngle(m_RigidBody.velocity, desiredMove, Vector3.up);
-                                    m_RigidBody.velocity = Quaternion.AngleAxis(angle, Vector3.up) * m_RigidBody.velocity;
-                                }
-                            }
-                            // WALL JUMP
-                            if (m_IsWallRunning)
-                            {
-                                wallRunCoolDown = movementSettings.WallRunCoolDown;
-                                m_IsWallRunning = false;
-                                m_CanDoubleJump = true;
-                                mustConsiderDirectionInput = false;
-                                Vector3 horizontalForce = wallRunNormal * movementSettings.WallJumpHorizontalForce;
-                                Debug.Log(horizontalForce);
-                                // TODO Consider to add a forward force to give the player a boost in speed
-                                m_RigidBody.AddForce(horizontalForce, ForceMode.Impulse);
-                            }
-                        }
-                        else
-                        {
-                            m_JumpDuration += Time.fixedDeltaTime;
-                        }
-
-                        m_RigidBody.AddForce(new Vector3(0f, movementSettings.JumpForce, 0f), ForceMode.Impulse);
-
-                    }
-
-                    if (!m_IsGrounded)
-                    {
-                        // CONDITION TO STOP JUMPING
-                        if (m_Jumping && (!m_Jump || m_JumpDuration >= movementSettings.JumpThreshold))
-                        {
-                            m_Jumping = false;
-                            m_CanJump = false;
-                            if (!m_Jumped)
-                            {
-                                m_Jumped = true;
-                                m_CanDoubleJump = true;
-                                mustConsiderDirectionInput = true;
-                            }
-                        }
-                    }
-                    else
-                    {
-                        if (turboPoints > 0)
-                        {
-                            turboPoints -= Time.fixedDeltaTime * movementSettings.turboConsumptionMultiplier;
-                            if (turboPoints < 0)
-                            {
-                                turboPoints = 0f;
-                            }
-                        }
-
-                    }
-                }
-
-                // ***** END OF THE JUMP SECTION ***** //
-
-                // ***** START OF THE WALLRUN INITIATION SECTION ***** //
-
-                if (!m_IsGrounded && IsWallToLeftOrRight() && !m_IsWallRunning && CanWallRun())
-                {
-                    wallRunForward = new Vector3();
-                    Vector3 velocityOnWall = new Vector3();
-
-                    if (IsWallToDirection(WallDirection.Right))
-                    {
-                        wallRunForward = GetWallForward(WallDirection.Right);
-                        wallRunNormal = GetWallNormal(WallDirection.Right);
-                    }
-                    else if (IsWallToDirection(WallDirection.Left))
-                    {
-                        wallRunForward = GetWallForward(WallDirection.Left);
-                        wallRunNormal = GetWallNormal(WallDirection.Left);
-                    }
-
-                    velocityOnWall = Vector3.Project(m_RigidBody.velocity, wallRunForward);
-                    if (velocityOnWall.magnitude > movementSettings.WallRunThreshold)
-                    {
-                        m_IsWallRunning = true;
-                        // PATCH HERE FOR A MORE REALISTIC SLOW DOWN FEELING
-                        if (m_RigidBody.velocity.y < 0f)
-                        {
+                            m_CanDoubleJump = false;
                             m_RigidBody.velocity = new Vector3(m_RigidBody.velocity.x, 0f, m_RigidBody.velocity.z);
-
+                            if (wannaMove && mustConsiderDirectionInput)
+                            {
+                                // TODO prevent backwards movements
+                                float angle = Vector3.SignedAngle(m_RigidBody.velocity, desiredMove, Vector3.up);
+                                m_RigidBody.velocity = Quaternion.AngleAxis(angle, Vector3.up) * m_RigidBody.velocity;
+                            }
                         }
-                        if (velocityOnWall.sqrMagnitude < (movementSettings.WallRunMaxSpeed * movementSettings.WallRunMaxSpeed))
+                        // WALL JUMP
+                        else if (m_IsWallRunning)
                         {
-                            Vector3 accelerationForce = wallRunForward * movementSettings.WallRunForce;
-                            accelerationForce *= 1f - (velocityOnWall.magnitude - movementSettings.WallRunThreshold) / (movementSettings.WallRunMaxSpeed - movementSettings.WallRunThreshold);
-                            m_RigidBody.AddForce(accelerationForce, ForceMode.Impulse);
+                            wallRunCoolDown = movementSettings.WallRunCoolDown;
+                            m_IsWallRunning = false;
+                            m_CanDoubleJump = true;
+                            //mustConsiderDirectionInput = false;
+                            Vector3 horizontalForce = wallRunNormal * movementSettings.WallJumpHorizontalForce;
+                            // TODO Consider to add a forward force to give the player a boost in speed
+                            m_RigidBody.AddForce(horizontalForce, ForceMode.Impulse);
                         }
-                    }
-                }
-
-                // ***** END OF THE WALLRUN INITIATION SECTION ***** //
-
-
-                // ***** START OF ROTATION CODE ***** //
-
-                if (m_IsWallRunning)
-                {
-
-                    float angleYAxis = Vector3.SignedAngle(m_RigidBody.transform.forward, wallRunForward, Vector3.up);
-                    float rotationYAxis = 0f;
-
-                    if (Math.Abs(angleYAxis) < movementSettings.RotationSpeedOnWall * Time.fixedDeltaTime)
-                    {
-                        rotationYAxis = angleYAxis;
                     }
                     else
                     {
-                        rotationYAxis = movementSettings.RotationSpeedOnWall;
-                        if (angleYAxis < 0)
-                        {
-                            rotationYAxis = -rotationYAxis;
-                        }
+                        m_JumpDuration += Time.fixedDeltaTime;
                     }
-                    transform.Rotate(Vector3.up * Time.fixedDeltaTime * rotationYAxis);
-
-
-                    Vector3 targetInclination = Vector3.up;
-                    if (IsWallToDirection(WallDirection.Right))
-                    {
-                        targetInclination = Quaternion.AngleAxis(movementSettings.WallRunAngle, wallRunForward) * targetInclination;
-                    }
-                    else if (IsWallToDirection(WallDirection.Left))
-                    {
-                        targetInclination = Quaternion.AngleAxis(-movementSettings.WallRunAngle, wallRunForward) * targetInclination;
-                    }
-
-                    float angleXAxis = Vector3.SignedAngle(m_RigidBody.transform.up, targetInclination, wallRunForward);
-                    float rotationXAxis = 0f;
-
-                    if (Math.Abs(angleXAxis) < movementSettings.RotationSpeedOnWall * Time.fixedDeltaTime)
-                    {
-                        rotationXAxis = angleXAxis;
-                    }
-                    else
-                    {
-                        rotationXAxis = movementSettings.RotationSpeedOnWall;
-                        if (angleXAxis < 0)
-                        {
-                            rotationXAxis = -rotationXAxis;
-                        }
-                    }
-                    //transform.Rotate(wallRunForward * Time.fixedDeltaTime * rotationXAxis, Space.World);
+                    m_RigidBody.AddForce(new Vector3(0f, movementSettings.JumpForce, 0f), ForceMode.Impulse);
                 }
 
-                // ***** END OF ROTATION CODE ***** //
-
-                // DRAG CONTROL
-                if (m_IsGrounded)
+                if (!m_IsGrounded)
                 {
-                    m_RigidBody.drag = 5f;
+                    // CONDITION TO STOP JUMPING
+                    if (m_Jumping && (!m_Jump || m_JumpDuration >= movementSettings.JumpThreshold))
+                    {
+                        m_Jumping = false;
+                        m_CanJump = false;
+                        if (!m_Jumped)
+                        {
+                            m_Jumped = true;
+                            m_CanDoubleJump = true;
+                            mustConsiderDirectionInput = true;
+                        }
+                    }
                 }
-                else if (m_IsWallRunning)
+                else
+                {   
+                    //TODO Add an input check
+                    if (turboPoints > 0)
+                    {
+                        turboPoints -= Time.fixedDeltaTime * movementSettings.turboConsumptionMultiplier;
+                        if (turboPoints < 0)
+                        {
+                            turboPoints = 0f;
+                        }
+                    }
+
+                }
+            }
+
+            // ***** END OF THE JUMP SECTION ***** //
+
+            // ***** START OF THE WALLRUN INITIATION SECTION ***** //
+
+            if (CanWallRun())
+            {
+                wallRunForward = GetWallForward();
+                wallRunNormal = GetWallNormal();
+
+                Vector3 velocityOnWall = Vector3.Project(m_RigidBody.velocity, wallRunForward);
+
+                if (velocityOnWall.magnitude > movementSettings.WallRunThreshold)
                 {
-                    m_RigidBody.drag = movementSettings.WallRunDrag;
+                    m_IsWallRunning = true;
+                    // PATCH HERE FOR A MORE REALISTIC SLOW DOWN FEELING
+                    if (m_RigidBody.velocity.y < 0f)
+                    {
+                        m_RigidBody.velocity = new Vector3(m_RigidBody.velocity.x, 0f, m_RigidBody.velocity.z);
+                    }
+                    if (velocityOnWall.sqrMagnitude < (movementSettings.WallRunMaxSpeed * movementSettings.WallRunMaxSpeed))
+                    {
+                        Vector3 accelerationForce = wallRunForward * movementSettings.WallRunForce;
+                        accelerationForce *= 1f - (velocityOnWall.magnitude - movementSettings.WallRunThreshold) / (movementSettings.WallRunMaxSpeed - movementSettings.WallRunThreshold);
+                        m_RigidBody.AddForce(accelerationForce, ForceMode.Impulse);
+                    }
+                }
+            }
+
+            // ***** END OF THE WALLRUN INITIATION SECTION ***** //
+
+
+            // ***** START OF ROTATION CODE ***** //
+
+            if (m_IsWallRunning)
+            {
+                float angleYAxis = Vector3.SignedAngle(m_RigidBody.transform.forward, wallRunForward, Vector3.up);
+                float rotationYAxis = 0f;
+
+                if (Math.Abs(angleYAxis) < movementSettings.RotationSpeedOnWall * Time.fixedDeltaTime)
+                {
+                    rotationYAxis = angleYAxis;
                 }
                 else
                 {
-                    m_RigidBody.drag = 0f;
+                    rotationYAxis = movementSettings.RotationSpeedOnWall;
+                    if (angleYAxis < 0)
+                    {
+                        rotationYAxis = -rotationYAxis;
+                    }
                 }
+                transform.Rotate(Vector3.up * Time.fixedDeltaTime * rotationYAxis);
+
+
+                Vector3 targetInclination = Vector3.up;
+                if (IsWallToDirection(WallDirection.Right))
+                {
+                    targetInclination = Quaternion.AngleAxis(movementSettings.WallRunAngle, wallRunForward) * targetInclination;
+                }
+                else if (IsWallToDirection(WallDirection.Left))
+                {
+                    targetInclination = Quaternion.AngleAxis(-movementSettings.WallRunAngle, wallRunForward) * targetInclination;
+                }
+
+                float angleXAxis = Vector3.SignedAngle(m_RigidBody.transform.up, targetInclination, wallRunForward);
+                float rotationXAxis = 0f;
+
+                if (Math.Abs(angleXAxis) < movementSettings.RotationSpeedOnWall * Time.fixedDeltaTime)
+                {
+                    rotationXAxis = angleXAxis;
+                }
+                else
+                {
+                    rotationXAxis = movementSettings.RotationSpeedOnWall;
+                    if (angleXAxis < 0)
+                    {
+                        rotationXAxis = -rotationXAxis;
+                    }
+                }
+                //transform.Rotate(wallRunForward * Time.fixedDeltaTime * rotationXAxis, Space.World);
+            }
+
+            // ***** END OF ROTATION CODE ***** //
+
+            // DRAG CONTROL
+            if (m_IsGrounded)
+            {
+                m_RigidBody.drag = 5f;
+            }
+            else if (m_IsWallRunning)
+            {
+                m_RigidBody.drag = movementSettings.WallRunDrag;
+            }
+            else
+            {
+                m_RigidBody.drag = 0f;
             }
         }
-
 
         private float SlopeMultiplier()
         {
             float angle = Vector3.Angle(m_GroundContactNormal, Vector3.up);
             return movementSettings.SlopeCurveModifier.Evaluate(angle);
         }
-
 
         private void StickToGroundHelper()
         {
@@ -493,7 +472,6 @@ namespace UnityStandardAssets.Characters.FirstPerson
             }
         }
 
-
         private Vector2 GetInput()
         {
 
@@ -506,7 +484,9 @@ namespace UnityStandardAssets.Characters.FirstPerson
             return input;
         }
 
-
+        // Pas possible de bouger le point de vue sans bouger le personnage.
+        // Tourner la caméra revient à tourner le personnage.
+        // La caméra EST le personnage.
         private void RotateView()
         {
             //avoids the mouse looking if the game is effectively paused
@@ -517,6 +497,8 @@ namespace UnityStandardAssets.Characters.FirstPerson
 
             mouseLook.LookRotation(transform, cam.transform);
 
+            // this part is ok when grounded.
+            // When in the air, it's more than discutable 
             if (m_IsGrounded || advancedSettings.airControl)
             {
                 // Rotate the rigidbody velocity to match the new direction that the character is looking
@@ -575,8 +557,21 @@ namespace UnityStandardAssets.Characters.FirstPerson
             {
                 direction = -transform.right;
             }
-            bool wall = Physics.Raycast(new Vector3(transform.position.x, transform.position.y, transform.position.z), direction, rayCastLengthCheck, layer);
+            bool wall = Physics.Raycast(new Vector3(transform.position.x, transform.position.y, transform.position.z), direction, rayCastLengthCheck, wallLayer);
             return wall;
+        }
+
+        private Vector3 GetWallForward()
+        {
+            Vector3 wallForward = new Vector3();
+            if (IsWallToDirection(WallDirection.Right))
+            {
+                wallForward = GetWallForward(WallDirection.Right);
+            } else if (IsWallToDirection(WallDirection.Left))
+            {
+                wallForward = GetWallForward(WallDirection.Left);
+            }
+            return wallForward;
         }
 
         private Vector3 GetWallForward(WallDirection d)
@@ -593,7 +588,7 @@ namespace UnityStandardAssets.Characters.FirstPerson
             {
                 direction = transform.right;
             }
-            if (Physics.Raycast(new Vector3(transform.position.x, transform.position.y, transform.position.z), direction, out hit, 10f * rayCastLengthCheck, layer))
+            if (Physics.Raycast(new Vector3(transform.position.x, transform.position.y, transform.position.z), direction, out hit, 10f * rayCastLengthCheck, wallLayer))
             {
                 wallInContact = hit.collider.gameObject;
                 if (OpposedTo(wallInContact.transform.forward, cam.transform.forward))
@@ -608,6 +603,17 @@ namespace UnityStandardAssets.Characters.FirstPerson
             return wallForwardDirection;
         }
 
+        private Vector3 GetWallNormal()
+        {
+            Vector3 wallNormal = new Vector3();
+            if (IsWallToDirection(WallDirection.Right){
+                wallNormal = GetWallNormal(WallDirection.Right);
+            } else if (IsWallToDirection(WallDirection.Left))
+            {
+                wallNormal = GetWallNormal(WallDirection.Left);
+            }
+            return wallNormal;
+        }
 
         // return the direction of the wall normal vector
         private Vector3 GetWallNormal(WallDirection d)
@@ -626,7 +632,7 @@ namespace UnityStandardAssets.Characters.FirstPerson
                 direction = -cam.transform.right;
             }
 
-            if (Physics.Raycast(new Vector3(transform.position.x, transform.position.y, transform.position.z), direction, out hit, 10f * rayCastLengthCheck, layer))
+            if (Physics.Raycast(new Vector3(transform.position.x, transform.position.y, transform.position.z), direction, out hit, 10f * rayCastLengthCheck, wallLayer))
             {
                 wallInContact = hit.collider.gameObject;
                 normal = wallInContact.transform.right;
@@ -634,9 +640,14 @@ namespace UnityStandardAssets.Characters.FirstPerson
             return normal;
         }
 
+        private bool CanJump()
+        {
+            return (m_IsGrounded || m_CanDoubleJump || m_Jumping || m_IsWallRunning);
+        }
+
         private bool CanWallRun()
         {
-            return wallRunCoolDown == 0f;
+            return (!m_IsGrounded && IsWallToLeftOrRight() && !m_IsWallRunning && wallRunCoolDown == 0f);
         }
     }
 }
