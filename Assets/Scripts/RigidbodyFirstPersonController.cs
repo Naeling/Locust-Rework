@@ -24,7 +24,7 @@ namespace UnityStandardAssets.Characters.FirstPerson
             public float JumpForce = 10f;  // Force applied at each frame of jumping
             public float JumpThreshold = 0.25f; // Time during which the player can hold its jump
             public float WallRunThreshold = 6.0f; // Minimum speed for a wall Run to be initiated
-            public float RotationSpeedOnWall = 20f; // Speed of the player's rotation when starting a wall run
+            public float RotationSpeedOnWall = 30f; // Speed of the player's rotation when starting a wall run
             public float WallRunAngle = 15f; // Angle of inclination with the wall while wall running
             public float MaxWallRunCompensationForce = 8.01f; // Maximum force applied to compensate the gravity while wall running
             public float WallRunDrag = 0.15f; // Horizontal slow down force
@@ -392,20 +392,22 @@ namespace UnityStandardAssets.Characters.FirstPerson
                 float angleYAxis = Vector3.SignedAngle(m_RigidBody.transform.forward, wallRunForward, Vector3.up);
                 float rotationYAxis = 0f;
 
-                if (Math.Abs(angleYAxis) < movementSettings.RotationSpeedOnWall * Time.fixedDeltaTime)
+                if (Math.Abs(angleYAxis) > float.Epsilon)
                 {
-                    rotationYAxis = angleYAxis;
-                }
-                else
-                {
-                    rotationYAxis = movementSettings.RotationSpeedOnWall;
-                    if (angleYAxis < 0)
+                    if (Math.Abs(angleYAxis) < movementSettings.RotationSpeedOnWall * Time.fixedDeltaTime)
                     {
-                        rotationYAxis = -rotationYAxis;
+                        rotationYAxis = angleYAxis;
                     }
+                    else
+                    {
+                        rotationYAxis = movementSettings.RotationSpeedOnWall;
+                        if (angleYAxis < 0)
+                        {
+                            rotationYAxis = -rotationYAxis;
+                        }
+                    }
+                    transform.Rotate(Vector3.up * Time.fixedDeltaTime * rotationYAxis);
                 }
-                transform.Rotate(Vector3.up * Time.fixedDeltaTime * rotationYAxis);
-
 
                 Vector3 targetInclination = Vector3.up;
                 if (IsWallToDirection(WallDirection.Right))
@@ -432,7 +434,7 @@ namespace UnityStandardAssets.Characters.FirstPerson
                         rotationXAxis = -rotationXAxis;
                     }
                 }
-                //transform.Rotate(wallRunForward * Time.fixedDeltaTime * rotationXAxis, Space.World);
+                transform.Rotate(wallRunForward * Time.fixedDeltaTime * rotationXAxis, Space.World);
             }
 
             // ***** END OF ROTATION CODE ***** //
@@ -606,7 +608,8 @@ namespace UnityStandardAssets.Characters.FirstPerson
         private Vector3 GetWallNormal()
         {
             Vector3 wallNormal = new Vector3();
-            if (IsWallToDirection(WallDirection.Right){
+            if (IsWallToDirection(WallDirection.Right))
+            {
                 wallNormal = GetWallNormal(WallDirection.Right);
             } else if (IsWallToDirection(WallDirection.Left))
             {
